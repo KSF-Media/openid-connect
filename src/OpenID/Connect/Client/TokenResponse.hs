@@ -29,6 +29,7 @@ import Control.Monad.Except
 import Control.Monad.Reader
 import qualified Crypto.JOSE.Compact as JOSE
 import qualified Crypto.JOSE.Error as JOSE
+import qualified Crypto.JOSE.JWE as JWE
 import Crypto.JWT as JWT
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy.Char8 as LChar8
@@ -38,7 +39,7 @@ import Data.Maybe (isJust)
 import Data.Text (Text)
 import qualified Data.Text.Encoding as Text
 import Data.Time.Clock (UTCTime)
-import OpenID.Connect.Authentication (ClientID)
+import OpenID.Connect.Authentication
 import OpenID.Connect.Client.Provider
 import OpenID.Connect.TokenResponse
 
@@ -49,15 +50,25 @@ import qualified Data.HashMap.Strict as Map
 #endif
 
 --------------------------------------------------------------------------------
--- | Decode the compacted identity token into a 'SignedJWT'.
+-- | Decode and decrypt if needed the compacted identity token into a
+-- 'SignedJWT'.
 decodeIdentityToken
-  :: TokenResponse Text
+  :: Credentials        -- ^ Decoding JWE requires decrypting as well
+  -> TokenResponse Text
   -> Either JOSE.Error (TokenResponse SignedJWT)
-decodeIdentityToken token
-  = JOSE.decodeCompact (LChar8.fromStrict (Text.encodeUtf8 (idToken token)))
-  & runExceptT
-  & runIdentity
-  & fmap (<$ token)
+decodeIdentityToken creds token = fmap (<$ token) $ runIdentity $ runExceptT $ do
+  -- First attempt it as a JWS
+  case JOSE.decodeCompact token' of
+    Right x -> pure x
+    -- Looks like a JWE
+    Left (JOSE.CompactDecodeError (JOSE.CompactInvalidNumberOfParts
+                                   (JOSE.InvalidNumberOfParts 3 5))) -> do
+      key <- maybe (throwError JOSE.NoUsableKeys) pure $
+        clientSecretAsJWK $ clientSecret creds
+      liftEither $ JWE.decryptJWE2JWS key Nothing =<< JOSE.decodeCompact token'
+    Left err -> throwError err
+  where
+    token' = LChar8.fromStrict (Text.encodeUtf8 (idToken token))
 
 --------------------------------------------------------------------------------
 -- | Identity token verification and claim validation.
